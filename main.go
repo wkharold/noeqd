@@ -3,10 +3,14 @@ package main
 import (
 	"flag"
 	"fmt"
+	"go9p.googlecode.com/hg/p"
+	"go9p.googlecode.com/hg/p/srv"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -33,12 +37,17 @@ var (
 	laddr    = flag.String("l", "0.0.0.0:4444", "the address to listen on")
 	lts      = flag.Int64("t", -1, "the last timestamp in milliseconds")
 	httpmode = flag.Bool("http", false, "run in http mode")
+	sport    = flag.String("s", "", "port for stats; not exported by default")
 )
 
 var (
 	mu  sync.Mutex
 	seq int64
 )
+
+type Stats struct {
+	srv.File
+}
 
 func main() {
 	parseFlags()
@@ -166,4 +175,40 @@ func nextId() (int64, error) {
 		seq
 
 	return id, nil
+}
+
+func serveStats() {
+	var addrslice []string
+	var err error
+	var saddr string
+	var stats *Stats
+	var s *srv.Fsrv
+
+	user := p.OsUsers.Uid2User(os.Geteuid())
+	root := new(srv.File)
+	err = root.Add(nil, "/", user, nil, p.DMDIR|0555, nil)
+	if err != nil {
+		goto error
+	}
+
+	stats = new(Stats)
+	err = stats.Add(root, "stats", p.OsUsers.Uid2User(os.Geteuid()), nil, 0444, stats)
+	if err != nil {
+		goto error
+	}
+
+	s = srv.NewFileSrv(root)
+	s.Dotu = true
+
+	addrslice = strings.Split(*laddr, ":")
+	saddr = fmt.Sprintf("%s:%s", addrslice[0], *sport)
+
+	s.Start(s)
+	err = s.StartNetListener("tcp", saddr)
+	if err != nil {
+		goto error
+	}
+
+error:
+	log.Printf("Error: %s\n", err)
 }
