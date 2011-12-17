@@ -46,7 +46,16 @@ var (
 )
 
 type Stats struct {
+	Requests uint64
+	Ids uint64
+}
+
+type StatsFile struct {
 	srv.File
+}
+
+func (s *StatsFile) Read(fid *srv.FFid, buf []byte, offset uint64) (int, error) {
+	return 0, nil
 }
 
 func main() {
@@ -181,7 +190,7 @@ func serveStats() {
 	var addrslice []string
 	var err error
 	var saddr string
-	var stats *Stats
+	var sf *StatsFile
 	var s *srv.Fsrv
 
 	user := p.OsUsers.Uid2User(os.Geteuid())
@@ -191,8 +200,8 @@ func serveStats() {
 		goto error
 	}
 
-	stats = new(Stats)
-	err = stats.Add(root, "stats", p.OsUsers.Uid2User(os.Geteuid()), nil, 0444, stats)
+	sf = new(StatsFile)
+	err = sf.Add(root, "stats", p.OsUsers.Uid2User(os.Geteuid()), nil, 0444, sf)
 	if err != nil {
 		goto error
 	}
