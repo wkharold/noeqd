@@ -47,7 +47,7 @@ var (
 
 type Stats struct {
 	Requests uint64
-	Ids uint64
+	Ids      uint64
 }
 
 type StatsFile struct {
