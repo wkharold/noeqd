@@ -37,30 +37,51 @@ var (
 	laddr    = flag.String("l", "0.0.0.0:4444", "the address to listen on")
 	lts      = flag.Int64("t", -1, "the last timestamp in milliseconds")
 	httpmode = flag.Bool("http", false, "run in http mode")
-	sport    = flag.String("s", "", "port for stats; not exported by default")
+	sport    = flag.Int64("s", 0, "port for stats; not exported by default")
 )
 
 var (
 	mu  sync.Mutex
+	sm  sync.Mutex
+	rqs uint64
+	ids uint64
 	seq int64
 )
 
-type Stats struct {
-	Requests uint64
-	Ids      uint64
-}
-
 type StatsFile struct {
 	srv.File
+	data []byte
 }
 
 func (s *StatsFile) Read(fid *srv.FFid, buf []byte, offset uint64) (int, error) {
-	return 0, nil
+	var b []byte
+	if len(s.data) == 0 {
+		str := fmt.Sprintf("%d,%d\n", rqs, ids)
+		b = []byte(str)
+	} else {
+		b = s.data
+	}
+	n := len(b)
+	if offset >= uint64(n) {
+		return 0, nil
+	}
+
+	b = b[int(offset):n]
+	n -= int(offset)
+	if len(buf) < n {
+		n = len(buf)
+	}
+
+	copy(buf[offset:int(offset)+n], b[offset:])
+	return n, nil
 }
 
 func main() {
 	parseFlags()
 	l := mustListen()
+	if *sport > 0 {
+		go serveStats()
+	}
 	if *httpmode {
 		acceptAndServeHTTP(l)
 	} else {
@@ -105,6 +126,10 @@ func acceptAndServe(l net.Listener) {
 			log.Println(err)
 		}
 
+		sm.Lock()
+		rqs++
+		sm.Unlock()
+
 		go func() {
 			err := serve(cn, cn)
 			if err != io.EOF {
@@ -147,6 +172,10 @@ func serve(r io.Reader, w io.Writer) error {
 		if err != nil {
 			return err
 		}
+		
+		sm.Lock()
+		ids += uint64(n)
+		sm.Unlock()
 	}
 
 	panic("not reached")
@@ -210,7 +239,7 @@ func serveStats() {
 	s.Dotu = true
 
 	addrslice = strings.Split(*laddr, ":")
-	saddr = fmt.Sprintf("%s:%s", addrslice[0], *sport)
+	saddr = fmt.Sprintf("%s:%d", addrslice[0], *sport)
 
 	s.Start(s)
 	err = s.StartNetListener("tcp", saddr)
