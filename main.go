@@ -55,12 +55,13 @@ type StatsFile struct {
 
 func (s *StatsFile) Read(fid *srv.FFid, buf []byte, offset uint64) (int, error) {
 	var b []byte
-	if len(s.data) == 0 {
-		str := fmt.Sprintf("%d,%d\n", rqs, ids)
-		b = []byte(str)
-	} else {
-		b = s.data
-	}
+	
+	sm.Lock()
+	str := fmt.Sprintf("%d,%d\n", rqs, ids)
+	sm.Unlock()
+	
+	b = []byte(str)
+
 	n := len(b)
 	if offset >= uint64(n) {
 		return 0, nil
@@ -172,7 +173,7 @@ func serve(r io.Reader, w io.Writer) error {
 		if err != nil {
 			return err
 		}
-		
+
 		sm.Lock()
 		ids += uint64(n)
 		sm.Unlock()
