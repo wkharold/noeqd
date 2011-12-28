@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,25 +29,188 @@ const (
 
 	// Tue, 21 Mar 2006 20:50:14.000 GMT
 	twepoch = int64(1288834974657)
+
+	idsz = 17
 )
 
 // Flags
 var (
-	wid      = flag.Int64("w", 0, "worker id")
-	did      = flag.Int64("d", 0, "datacenter id")
-	laddr    = flag.String("l", "0.0.0.0:4444", "the address to listen on")
-	lts      = flag.Int64("t", -1, "the last timestamp in milliseconds")
-	httpmode = flag.Bool("http", false, "run in http mode")
-	sport    = flag.Int64("s", 0, "port for stats; not exported by default")
+	wid   = flag.Int64("w", 0, "worker id")
+	did   = flag.Int64("d", 0, "datacenter id")
+	laddr = flag.String("l", "0.0.0.0:4444", "the address to listen on")
+	lts   = flag.Int64("t", -1, "the last timestamp in milliseconds")
+	mode  = flag.String("m", "tcp", "run in specified mode")
+	sport = flag.Int64("s", 0, "port for stats; not exported by default")
 )
 
 var (
-	mu  sync.Mutex
-	sm  sync.Mutex
-	rqs uint64
-	ids uint64
-	seq int64
+	mu   sync.Mutex
+	sm   sync.Mutex
+	root *srv.File
+	rqs  uint64
+	ids  uint64
+	seq  int64
 )
+
+type CtlFile struct {
+	srv.File
+	parent   *srv.File
+	datafile []byte
+}
+
+func (c *CtlFile) Read(fid *srv.FFid, buf []byte, offset uint64) (int, error) {
+	log.Printf("Reading ctl file [%s] (%d)\n", fid, offset)
+	var b []byte
+
+	n := len(c.datafile)
+	if offset > uint64(0) {
+		return 0, nil
+	}
+
+	log.Printf("\tdatafile = %s\n", c.datafile)
+	b = c.datafile
+	if len(buf) < n {
+		n = len(buf)
+	}
+
+	copy(buf, b)
+	log.Printf("\tread: %s\n", buf)
+	return n, nil
+}
+
+func (c *CtlFile) Write(fid *srv.FFid, data []byte, offset uint64) (int, error) {
+	ids, err := strconv.Atoi(string(data))
+	if err != nil {
+		log.Fatalf("%s\n", err)
+		return -1, err
+	}
+
+	if ids <= 0 {
+		log.Printf("Done with %s\n", fid)
+		return len(data), nil
+	}
+
+	user := p.OsUsers.Uid2User(os.Geteuid())
+
+	now := time.Now()
+	dfname := fmt.Sprintf("%d%d%d%d%d%d", now.Year(), now.Month(), now.Day(), now.Hour(), now.Minute(), now.Second())
+	df := new(DataFile)
+	err = df.Add(c.parent, dfname, user, nil, 0777, df)
+	if err != nil {
+		return -1, &p.Error{"cannot create data file", 0}
+	}
+
+	df.uuids = make([][]byte, ids)
+	for i := uint(0); i < uint(ids); i++ {
+		id, err := nextId()
+		if err != nil {
+			return -1, err
+		}
+
+		uuid := fmt.Sprintf("%02x%02x%02x%02x%02x%02x%02x%02x\n",
+			byte(id>>56),
+			byte(id>>48),
+			byte(id>>40),
+			byte(id>>32),
+			byte(id>>24),
+			byte(id>>16),
+			byte(id>>8),
+			byte(id))
+
+		log.Printf("uuids[%d]\t%s (%d)", i, []byte(uuid), len([]byte(uuid)))
+		df.uuids[i] = make([]byte, idsz)
+		copy(df.uuids[i][:idsz], []byte(uuid)[:idsz])
+	}
+	df.Length = uint64(ids * idsz)
+	
+	log.Printf("%s", df.uuids)
+
+	c.datafile = make([]byte, len(dfname))
+	copy(c.datafile, []byte(dfname))
+	log.Printf("\tdatafile is: %s [%d]\n", c.datafile, len(df.uuids))
+	return len(data), nil
+}
+
+type DataFile struct {
+	srv.File
+	uuids [][]byte
+}
+
+func (d *DataFile) Read(fid *srv.FFid, buf []byte, offset uint64) (int, error) {
+	log.Printf("Reading datafile [%s]\n", fid)
+	if offset > d.Length {
+		log.Printf("\toffset beyond eof\n")
+		return 0, nil
+	}
+	
+	log.Printf("\t%d bytes available\n", d.Length)
+
+	count := len(buf)
+	if offset+uint64(count) > d.Length {
+		count = int(d.Length - offset)
+	}
+	log.Printf("\treading %d bytes\n", count)
+
+	for n, off, b := offset/uint64(idsz), offset%uint64(idsz), buf[0:count]; len(b) > 0; n++ {
+		m := idsz - int(off)
+		if m > len(b) {
+			m = len(b)
+		}
+
+		blk := make([]byte, idsz)
+		if len(d.uuids[n]) != 0 {
+			blk = d.uuids[n]
+		}
+
+		log.Printf("read block %d off %d len %d l %d ll %d\n", n, off, m, len(blk), len(b))
+		copy(b, blk[off:off+uint64(m)])
+		b = b[m:]
+		off = 0
+	}
+
+	return count, nil
+}
+
+type Clone struct {
+	srv.File
+	clones int
+}
+
+func (k *Clone) Read(fid *srv.FFid, buf []byte, offset uint64) (int, error) {
+	var err error
+
+	// we only allow a single read from us, change the offset and we're done
+	if offset > uint64(0) {
+		return 0, nil
+	}
+
+	user := p.OsUsers.Uid2User(os.Geteuid())
+
+	k.clones++
+	name := strconv.Itoa(k.clones)
+	f := new(srv.File)
+	err = f.Add(root, name, user, nil, p.DMDIR|0777, f)
+	if err != nil {
+		return 0, &p.Error{"can not create dir", 0}
+	}
+
+	ctl := new(CtlFile)
+	ctl.parent = f
+	ctl.datafile = make([]byte, 0)
+	err = ctl.Add(f, "ctl", user, nil, 0777, ctl)
+	if err != nil {
+		return 0, &p.Error{"cannot create ctl file", 0}
+	}
+
+	b := []byte(name)
+	if len(buf) < len(b) {
+		f.Remove()
+		return 0, &p.Error{"not enough buffer space for result", 0}
+	}
+
+	copy(buf, b)
+	return len(b), nil
+}
 
 type StatsFile struct {
 	srv.File
@@ -55,11 +219,11 @@ type StatsFile struct {
 
 func (s *StatsFile) Read(fid *srv.FFid, buf []byte, offset uint64) (int, error) {
 	var b []byte
-	
+
 	sm.Lock()
 	str := fmt.Sprintf("%d,%d\n", rqs, ids)
 	sm.Unlock()
-	
+
 	b = []byte(str)
 
 	n := len(b)
@@ -79,14 +243,24 @@ func (s *StatsFile) Read(fid *srv.FFid, buf []byte, offset uint64) (int, error) 
 
 func main() {
 	parseFlags()
-	l := mustListen()
-	if *sport > 0 {
-		go serveStats()
-	}
-	if *httpmode {
-		acceptAndServeHTTP(l)
+
+	if *mode == "9p" {
+		serve9p()
 	} else {
-		acceptAndServe(l)
+		l := mustListen()
+
+		if *sport > 0 {
+			go serveStats()
+		}
+
+		switch *mode {
+		case "http":
+			acceptAndServeHTTP(l)
+			return
+		default:
+			acceptAndServe(l)
+			return
+		}
 	}
 }
 
@@ -99,6 +273,52 @@ func parseFlags() {
 	if *did < 0 || *did > maxDatacenterId {
 		log.Fatalf("datacenter id must be between 0 and %d", maxDatacenterId)
 	}
+}
+
+func mkroot() (*srv.File, error) {
+	root := new(srv.File)
+	err := root.Add(nil, "/", p.OsUsers.Uid2User(os.Geteuid()), nil, p.DMDIR|0555, nil)
+	if err != nil {
+		return nil, err
+	}
+	return root, nil
+}
+
+func serve9p() {
+	var cl *Clone
+	var err error
+	var s *srv.Fsrv
+	var sf *StatsFile
+
+	root, err = mkroot()
+	if err != nil {
+		goto error
+	}
+
+	cl = new(Clone)
+	err = cl.Add(root, "clone", p.OsUsers.Uid2User(os.Geteuid()), nil, 0444, cl)
+	if err != nil {
+		goto error
+	}
+
+	sf = new(StatsFile)
+	err = sf.Add(root, "stats", p.OsUsers.Uid2User(os.Geteuid()), nil, 0444, sf)
+	if err != nil {
+		goto error
+	}
+
+	s = srv.NewFileSrv(root)
+	s.Dotu = true
+
+	s.Start(s)
+	err = s.StartNetListener("tcp", *laddr)
+	if err != nil {
+		goto error
+	}
+	return
+
+error:
+	log.Fatalf("Error serving 9p: %s\n", err)
 }
 
 func mustListen() net.Listener {
@@ -212,7 +432,8 @@ func nextId() (int64, error) {
 		(*did << datacenterIdShift) |
 		(*wid << workerIdShift) |
 		seq
-
+	
+	log.Printf("nextId: %x\n", id)
 	return id, nil
 }
 
@@ -223,9 +444,7 @@ func serveStats() {
 	var sf *StatsFile
 	var s *srv.Fsrv
 
-	user := p.OsUsers.Uid2User(os.Geteuid())
-	root := new(srv.File)
-	err = root.Add(nil, "/", user, nil, p.DMDIR|0555, nil)
+	root, err := mkroot()
 	if err != nil {
 		goto error
 	}
