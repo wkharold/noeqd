@@ -3,8 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
-	"go9p.googlecode.com/hg/p"
-	"go9p.googlecode.com/hg/p/srv"
+	"code.google.com/p/go9p/p"
+	"code.google.com/p/go9p/p/srv"
 	"io"
 	"log"
 	"net"
@@ -54,12 +54,10 @@ var (
 
 type CtlFile struct {
 	srv.File
-	parent   *srv.File
 	datafile []byte
 }
 
 func (c *CtlFile) Read(fid *srv.FFid, buf []byte, offset uint64) (int, error) {
-	log.Printf("Reading ctl file [%s] (%d)\n", fid, offset)
 	var b []byte
 
 	n := len(c.datafile)
@@ -67,14 +65,12 @@ func (c *CtlFile) Read(fid *srv.FFid, buf []byte, offset uint64) (int, error) {
 		return 0, nil
 	}
 
-	log.Printf("\tdatafile = %s\n", c.datafile)
 	b = c.datafile
 	if len(buf) < n {
 		n = len(buf)
 	}
 
 	copy(buf, b)
-	log.Printf("\tread: %s\n", buf)
 	return n, nil
 }
 
@@ -86,7 +82,6 @@ func (c *CtlFile) Write(fid *srv.FFid, data []byte, offset uint64) (int, error) 
 	}
 
 	if ids <= 0 {
-		log.Printf("Done with %s\n", fid)
 		return len(data), nil
 	}
 
@@ -95,7 +90,7 @@ func (c *CtlFile) Write(fid *srv.FFid, data []byte, offset uint64) (int, error) 
 	now := time.Now()
 	dfname := fmt.Sprintf("%d%d%d%d%d%d", now.Year(), now.Month(), now.Day(), now.Hour(), now.Minute(), now.Second())
 	df := new(DataFile)
-	err = df.Add(c.parent, dfname, user, nil, 0777, df)
+	err = df.Add(c.File.Parent, dfname, user, nil, 0777, df)
 	if err != nil {
 		return -1, &p.Error{"cannot create data file", 0}
 	}
@@ -117,17 +112,13 @@ func (c *CtlFile) Write(fid *srv.FFid, data []byte, offset uint64) (int, error) 
 			byte(id>>8),
 			byte(id))
 
-		log.Printf("uuids[%d]\t%s (%d)", i, []byte(uuid), len([]byte(uuid)))
 		df.uuids[i] = make([]byte, idsz)
 		copy(df.uuids[i][:idsz], []byte(uuid)[:idsz])
 	}
 	df.Length = uint64(ids * idsz)
 	
-	log.Printf("%s", df.uuids)
-
 	c.datafile = make([]byte, len(dfname))
 	copy(c.datafile, []byte(dfname))
-	log.Printf("\tdatafile is: %s [%d]\n", c.datafile, len(df.uuids))
 	return len(data), nil
 }
 
@@ -137,19 +128,14 @@ type DataFile struct {
 }
 
 func (d *DataFile) Read(fid *srv.FFid, buf []byte, offset uint64) (int, error) {
-	log.Printf("Reading datafile [%s]\n", fid)
 	if offset > d.Length {
-		log.Printf("\toffset beyond eof\n")
 		return 0, nil
 	}
 	
-	log.Printf("\t%d bytes available\n", d.Length)
-
 	count := len(buf)
 	if offset+uint64(count) > d.Length {
 		count = int(d.Length - offset)
 	}
-	log.Printf("\treading %d bytes\n", count)
 
 	for n, off, b := offset/uint64(idsz), offset%uint64(idsz), buf[0:count]; len(b) > 0; n++ {
 		m := idsz - int(off)
@@ -162,7 +148,6 @@ func (d *DataFile) Read(fid *srv.FFid, buf []byte, offset uint64) (int, error) {
 			blk = d.uuids[n]
 		}
 
-		log.Printf("read block %d off %d len %d l %d ll %d\n", n, off, m, len(blk), len(b))
 		copy(b, blk[off:off+uint64(m)])
 		b = b[m:]
 		off = 0
@@ -195,7 +180,6 @@ func (k *Clone) Read(fid *srv.FFid, buf []byte, offset uint64) (int, error) {
 	}
 
 	ctl := new(CtlFile)
-	ctl.parent = f
 	ctl.datafile = make([]byte, 0)
 	err = ctl.Add(f, "ctl", user, nil, 0777, ctl)
 	if err != nil {
@@ -433,7 +417,6 @@ func nextId() (int64, error) {
 		(*wid << workerIdShift) |
 		seq
 	
-	log.Printf("nextId: %x\n", id)
 	return id, nil
 }
 
